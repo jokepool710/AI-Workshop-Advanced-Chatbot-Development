@@ -1,0 +1,254 @@
+-- Deploy to AWS ECS--
+
+### **1. Set Up Your Environment**
+
+Ensure you have the AWS CLI installed and configured.
+
+1. Install AWS CLI: Follow the instructions from the [**official AWS documentation**](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html).
+2. Configure AWS CLI: Run the following command and enter your AWS access key, secret key, region, and output format.
+
+```markup
+aws configure
+```
+
+### **2. Create Dockerfile**
+
+Build a Dockerfile for your Flask app.
+# Use an official Python runtime as a parent image
+FROM python:3.9-slim
+
+# Set the working directory in the container
+WORKDIR /app
+
+# Copy the requirements file into the container
+COPY ./requirements.txt /app
+
+# Install any needed packages specified in requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the current directory contents into the container at /app
+COPY . /app
+
+# Make port 80 available to the world outside this container
+EXPOSE 80
+
+# Run app.py when the container launches
+CMD ["python", "app.py"]  
+
+
+- `FROM`: Specifies the base image.
+- `WORKDIR`: Sets the working directory inside the container.
+- `COPY`: Copies files from the local machine to the container.
+- `RUN`: Installs the required packages.
+- `EXPOSE`: Exposes port 80.
+- `CMD`: Specifies the command to run when the container starts.
+
+3. Push to DockerHub
+Authenticate and push your Docker image to DockerHub.
+1. Log in to DockerHub:
+2. Build the Docker image: docker build -t your_dockerhub_username/chatbot:latest .
+3. Push the Docker image:docker push your_dockerhub_username/chatbot:latest
+
+### **4. Create the Terraform File**
+
+Create the Terraform file (`main.tf)` to define AWS infrastructure.
+
+Here’s the `main.tf` file explained:
+
+--python 
+provider "aws" {
+  region = "us-east-1"
+}
+
+resource "aws_vpc" "chatbot_vpc" {
+  cidr_block = "10.0.0.0/16"
+}
+
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.chatbot_vpc.id
+}
+
+resource "aws_route_table" "public_rt" {
+  vpc_id = aws_vpc.chatbot_vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
+  }
+}
+
+resource "aws_subnet" "chatbot_subnet_1" {
+  vpc_id                  = aws_vpc.chatbot_vpc.id
+  cidr_block              = "10.0.1.0/24"
+  availability_zone       = "us-east-1a"
+  map_public_ip_on_launch = true
+}
+
+resource "aws_subnet" "chatbot_subnet_2" {
+  vpc_id                  = aws_vpc.chatbot_vpc.id
+  cidr_block              = "10.0.2.0/24"
+  availability_zone       = "us-east-1b"
+  map_public_ip_on_launch = true
+}
+
+resource "aws_subnet" "chatbot_subnet_3" {
+  vpc_id                  = aws_vpc.chatbot_vpc.id
+  cidr_block              = "10.0.3.0/24"
+  availability_zone       = "us-east-1c"
+  map_public_ip_on_launch = true
+}
+
+resource "aws_route_table_association" "a" {
+  subnet_id      = aws_subnet.chatbot_subnet_1.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_route_table_association" "b" {
+  subnet_id      = aws_subnet.chatbot_subnet_2.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_route_table_association" "c" {
+  subnet_id      = aws_subnet.chatbot_subnet_3.id
+  route_table_id = aws_route_table.public_rt.id
+}
+
+resource "aws_security_group" "chatbot_sg" {
+  name        = "chatbot-sg"
+  description = "Allow HTTP traffic"
+  vpc_id      = aws_vpc.chatbot_vpc.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_ecs_cluster" "chatbot_cluster" {
+  name = "chatbot-cluster"
+}
+
+resource "aws_iam_role" "ecsTaskExecutionRole" {
+  name = "ecsTaskExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [{
+      Action = "sts:AssumeRole",
+      Effect = "Allow",
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+    }]
+  })
+
+  managed_policy_arns = [
+    "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy",
+    "arn:aws:iam::aws:policy/CloudWatchLogsFullAccess"
+  ]
+}
+
+resource "aws_ecs_task_definition" "chatbot_task" {
+  family                   = "chatbot-task"
+  network_mode             = "awsvpc"
+  requires_compatibilities = ["FARGATE"]
+  cpu                      = "8192"
+  memory                   = "20480"
+  execution_role_arn       = aws_iam_role.ecsTaskExecutionRole.arn
+
+  container_definitions = jsonencode([{
+    name      = "chatbot"
+    image     = "your_dockerhub_username/chatbot:latest"
+    essential = true
+    portMappings = [{
+      containerPort = 80
+      hostPort      = 80
+    }]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = "/ecs/chatbot"
+        awslogs-region        = "us-east-1"
+        awslogs-stream-prefix = "ecs"
+      }
+    }
+  }])
+}
+
+resource "aws_ecs_service" "chatbot_service" {
+  name            = "chatbot-service"
+  cluster         = aws_ecs_cluster.chatbot_cluster.id
+  task_definition = aws_ecs_task_definition.chatbot_task.arn
+  desired_count   = 1
+
+  launch_type = "FARGATE"
+
+  network_configuration {
+    subnets          = [aws_subnet.chatbot_subnet_1.id, aws_subnet.chatbot_subnet_2.id, aws_subnet.chatbot_subnet_3.id]
+    security_groups  = [aws_security_group.chatbot_sg.id]
+    assign_public_ip = true
+  }
+}
+
+resource "aws_cloudwatch_log_group" "ecs_log_group" {
+  name              = "/ecs/chatbot"
+  retention_in_days = 7
+}
+
+output "service_url" {
+  value = aws_ecs_service.chatbot_service.network_configuration
+
+Detailed Explanation:
+
+1. **Provider and VPC**: Sets up AWS as the provider and creates a VPC with the specified CIDR block.
+2. **Internet gateway and route table**: Configures internet access and routes for the VPC.
+3. **Subnets**: Creates three public subnets in different availability zones.
+4. **Route table associations**: Associates the subnets with the route table.
+5. **Security group**: Creates a security group allowing HTTP traffic on port 80.
+6. **ECS cluster**: Defines an ECS cluster.
+7. **IAM role**: Creates an IAM role for ECS task execution.
+8. **ECS task definition**: Specifies the task definition for running the Docker container on Fargate.
+9. **ECS service**: Defines the ECS service that runs the task definition.
+10. **CloudWatch log group**: Creates a log group for ECS logs.
+11. **Output**: Provides the network configuration of the ECS service.
+
+### **5. Deploy**
+
+Apply the Terraform configuration.
+
+1. Initialize Terraform:terraform init
+2. Apply the Terraform configuration:terraform apply
+### **6. Verify**
+
+Check in ECS that the task is running and test it.
+
+1. Go to the ECS Console:
+
+- Navigate to the [**ECS Console**](https://console.aws.amazon.com/ecs/home).
+
+2. Check the ECS Cluster:
+
+- Click on the cluster you created (chatbot-cluster).
+- Under the "Tasks" tab, ensure there is a running task.
+
+3. Check the Task Details:
+
+- Click on the running task.
+- Ensure the status is RUNNING and note the public IP address.
+
+4. Test the Chatbot:
+
+- Use the noted public IP address to make a request to the chatbot.
+
+Open a terminal or use a tool like Postman and run:curl -X POST "http://<
+public-ip>:80/chat" -H "Content-Type: application/json" -d '{"message":"Hello, Tanishq Mahajan"}'
+Replace <public-ip> with the actual IP address of the running ECS task.
